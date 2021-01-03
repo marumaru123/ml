@@ -16,51 +16,41 @@ import os
 from lstmclassifier import LSTMClassifier
 import settings
 
-# deviceはGPUの利用可否に応じでcudaまたはcpuがセットされます。
+# deviceはGPUの利用可否に応じでcudaまたはcpuをセット
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 torch.manual_seed(1)
 
-"""
-定数の定義と必要なパッケージのインポート
-先にこのモデルの学習とテストで利用する定数を定義しておきます。
+def create_y_data(_df):
+    #dfのうちfuture_num個目以降のCloseをfuture_priceとする
+    future_price = _df.iloc[settings.future_num:]['Close'].values
+    #dfのうち後ろからfuture_num個目のCloseをcurr_priceとする
+    curr_price   = _df.iloc[:-settings.future_num]['Close'].values
 
-future_numでは、価格が上がるか下がるかを予測する未来の10分足数です。ここでは10分足データの144足分のため、1日先の価格が上がるか下がるか、の予測となります。
-feature_numは入力データの特徴量の数で、ボリューム、Open, High, Low, Closeの5項目を利用します。
-batch_sizeはLSTMの学習時に一度に投入するデータポイント数です。
-time_stepsは、LSTMが予測で利用する過去のデータポイントの数です。今回は過去の50個分のデータを見て、144個先のClose値が現在に比べて上がるのか下がるのかを予測するモデルとしています。
-moving_average_numで500と指定しています。これは、LSTMに投入するデータは過去500足分の移動平均に対する現在の値の比率とするためです。
-n_epochsはLSTMのトレーニングで何epoch数分実施するかです。
-val_idx_from、test_idx_fromはそれぞれデータの何行目以降を評価用、テスト用として分割するかの位置です。
-lstm_hidden_dim, target_dimはLSTMの隠れ層の出力サイズと最終出力サイズです。
-"""
+    y_data_tmp = future_price - curr_price              # future_price - curr_price
+    y_data = np.zeros_like(y_data_tmp)                  # ゼロで初期化
+    y_data[y_data_tmp > 0] = 1                          # future_price - curr_priceがゼロより大きい場合1とする。
+    y_data = y_data[settings.moving_average_num:]       # 移動平均を算出する行以降を最終的な教師データとする
+    return y_data
 
-#何足先を予測するか
-#future_num = 144
-#future_num = 96 # 翌日の同時間帯がどれだけ後か 15分足だと1440 / 15 = 96
+def create_X_data(_df):
+    cols = _df.columns
+    for col in cols:
+        #df['Roll_' + col] = df[col].rolling(window=500, min_periods=500).mean() # 移動平均を算出してRoll_[カラム名]というカラムを作成して設定する
+        _df['Roll_' + col] = _df[col].rolling(window=settings.moving_average_num, min_periods=settings.moving_average_num).mean()
+        _df[col] = _df[col] / _df['Roll_' + col] - 1                           # カラム / 移動平均 - 1
 
-#volume, open, high, low, closeの5項目
-#feature_num = 5 #特徴量
+    #最初の500足分は移動平均データがないため除く。後半の144足分は予測データがないため除く
+    return _df.iloc[settings.moving_average_num:-settings.future_num][cols].values
 
-#batch_size = 128 # LSTMに渡すレコード数のこと
-
-# lstmのtimesteps
-#time_steps = 50
-
-# 移動平均を取るCandle数
-#moving_average_num = 500
-#moving_average_num = 300
-
-#n_epocs = 30
-#n_epocs = 30 #学習する回数
-
-#データをtrain, testに分割するIndex
-#val_idx_from = 80000
-#test_idx_from = 100000
-#val_idx_from  = 80000   # csvのこれより前のレコードを学習に使用する
-#test_idx_from = 100000  # csvのval_idx_fromより後で、これより前のレコードを評価に使用して、これより後のレコードをテスト用データとする
-
-#lstm_hidden_dim = 16 # LSTMの隠れ層の出力サイズ
-#target_dim = 1       # LSTMの隠れ層の最終出力サイズ
+def eval_data(_X_val, _Y_val):
+    with torch.no_grad():
+        feats_test = prep_feature_data(np.arange(settings.time_steps, X_test.size(0)), settings.time_steps, X_test, settings.feature_num, device)
+        val_scores = model(feats_test)
+        tmp_scores = val_scores.view(-1).to('cpu').numpy()
+        bi_scores  = np.round(tmp_scores)
+        acc_score  = accuracy_score(y_test[settings.time_steps:], bi_scores)
+        roc_score  = roc_auc_score(y_test[settings.time_steps:], tmp_scores)
+    return acc_score, roc_score
 
 """
 データ準備
@@ -77,21 +67,10 @@ Oanda APIで取得したCSVデータを読み込みます。
 df = pd.read_csv('./data/data.csv', index_col='Datetime')
 
 # 2. 教師データの作成
-future_price = df.iloc[settings.future_num:]['Close'].values #dfのうちfuture_num個目以降のCloseをfuture_priceとする
-curr_price = df.iloc[:-settings.future_num]['Close'].values  #dfのうち後ろからfuture_num個目のCloseをcurr_priceとする
-y_data_tmp = future_price - curr_price              # future_price - curr_price
-y_data = np.zeros_like(y_data_tmp)                  # 教師データをゼロで初期化
-y_data[y_data_tmp > 0] = 1                          # future_price - curr_priceがゼロより大きい場合1とする。
-y_data = y_data[settings.moving_average_num:]                # 移動平均を算出する行以降を最終的な教師データとする
-# 3. 価格の正規化
-cols = df.columns
-for col in cols:
-    #df['Roll_' + col] = df[col].rolling(window=500, min_periods=500).mean() # 移動平均を算出してRoll_[カラム名]というカラムを作成して設定する
-    df['Roll_' + col] = df[col].rolling(window=settings.moving_average_num, min_periods=settings.moving_average_num).mean()
-    df[col] = df[col] / df['Roll_' + col] - 1                           # カラム / 移動平均 - 1
+y_data = create_y_data(df)
 
-#最初の500足分は移動平均データがないため除く。後半の144足分は予測データがないため除く
-X_data = df.iloc[settings.moving_average_num:-settings.future_num][cols].values
+# 3. 価格の正規化
+X_data = create_X_data(df)
 
 # 4. データの分割、TorchのTensorに変換
 #学習用データ(X_dataとy_dataのインデックスがval_idx_from件数までを学習用データとする)
@@ -123,6 +102,17 @@ def prep_feature_data(batch_idx, time_steps, X_data, feature_num, device):
         feats[b_i, :, :] = X_data[b_slc, :]
 
     return feats
+
+def eval_data(_X_val, _Y_val):
+    with torch.no_grad():
+        feats = prep_feature_data(np.arange(settings.time_steps, _X_val.size(0)), settings.time_steps, _X_val, settings.feature_num, device)
+        val_scores = model(feats)
+        tmp_scores = val_scores.view(-1).to('cpu').numpy()
+        bi_scores  = np.round(tmp_scores)
+        acc_score  = accuracy_score(_Y_val[settings.time_steps:], bi_scores)
+        roc_score  = roc_auc_score(_Y_val[settings.time_steps:], tmp_scores)
+    return acc_score, roc_score
+
 """
 LSTM学習の実施
 
@@ -170,16 +160,10 @@ for epoch in range(settings.n_epocs):
 
     # 5. validationデータの評価
     print('EPOCH: ', str(epoch), ' loss :', loss.item())
-    with torch.no_grad():
-        feats_val = prep_feature_data(np.arange(settings.time_steps, X_val.size(0)), settings.time_steps, X_val, settings.feature_num, device)
-        val_scores = model(feats_val)
-        tmp_scores = val_scores.view(-1).to('cpu').numpy()
-        bi_scores = np.round(tmp_scores)
-        acc_score = accuracy_score(y_val[settings.time_steps:], bi_scores)
-        roc_score = roc_auc_score(y_val[settings.time_steps:], tmp_scores)
-        # Val ACC = validationデータに対する精度
-        # ROC AUC = AUC(Area under an ROC curve) AUCが1に近いほど性能が高いモデル        
-        print('Val ACC Score :', acc_score, ' ROC AUC Score :', roc_score)
+    acc_score, roc_score = eval_data(X_val, y_val) 
+    # Val ACC = validationデータに対する精度
+    # ROC AUC = AUC(Area under an ROC curve) AUCが1に近いほど性能が高いモデル        
+    print('Val ACC Score :', acc_score, ' ROC AUC Score :', roc_score)
 
     # 6. validationの評価が良ければモデルを保存
     if acc_score > best_acc_score:
@@ -193,11 +177,5 @@ for epoch in range(settings.n_epocs):
 
 # 7. bestモデルで予測する。
 model.load_state_dict(torch.load('./models/pytorch_v1.mdl'))
-with torch.no_grad():
-    feats_test = prep_feature_data(np.arange(settings.time_steps, X_test.size(0)), settings.time_steps, X_test, settings.feature_num, device)
-    val_scores = model(feats_test)
-    tmp_scores = val_scores.view(-1).to('cpu').numpy()
-    bi_scores = np.round(tmp_scores)
-    acc_score = accuracy_score(y_test[settings.time_steps:], bi_scores)
-    roc_score = roc_auc_score(y_test[settings.time_steps:], tmp_scores)
-    print('Test ACC Score :', acc_score, ' ROC AUC Score :', roc_score)
+acc_score, roc_score = eval_data(X_test, y_test) 
+print('Test ACC Score :', acc_score, ' ROC AUC Score :', roc_score)
