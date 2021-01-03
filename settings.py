@@ -1,12 +1,6 @@
 #!/usr/bin/env python
 # coding: utf-8
 
-import torch
-
-# deviceはGPUの利用可否に応じでcudaまたはcpuがセットされます。
-device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-torch.manual_seed(1)
-
 """
 定数の定義と必要なパッケージのインポート
 先にこのモデルの学習とテストで利用する定数を定義しておきます。
@@ -37,8 +31,8 @@ time_steps = 50
 moving_average_num = 500
 #moving_average_num = 300
 
-#n_epocs = 30
-n_epocs = 5 #学習する回数
+n_epocs = 30
+#n_epocs = 5 #学習する回数
 
 #データをtrain, testに分割するIndex
 #val_idx_from = 80000
