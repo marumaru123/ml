@@ -113,6 +113,28 @@ def eval_data(_X_val, _Y_val):
         roc_score  = roc_auc_score(_Y_val[settings.time_steps:], tmp_scores)
     return acc_score, roc_score
 
+def save_model():
+    if not os.path.exists("./models"):
+        os.mkdir("./models")
+    #if os.path.exists('./models/pytorch_v1.mdl'):
+    #    os.remove('./models/pytorch_v1.mdl')
+    torch.save(model.state_dict(),'./models/pytorch_v1.mdl')
+    print('best score updated, Pytorch model was saved!!', )
+
+def exec_learning(perm_idx, t_i):
+    batch_idx = perm_idx[t_i:(t_i + settings.batch_size)] #t_i件目からbatch_size(128)行目を抜き出す
+    # 3. LSTM入力用の時系列データの準備
+    # featsは、次元が(128(batch_size), 50(time_steps), 5(Columns)）でX_trainのbatch_idxの各インデックスの値が設定されたもの
+    feats = prep_feature_data(batch_idx, settings.time_steps, X_train, settings.feature_num, device)
+    y_target = y_train[batch_idx]                #学習用データからbatch_idxを抜き出してy_targetとする
+    # 4. pytorch LSTMの学習実施
+    model.zero_grad()
+    train_scores = model(feats) # batch size x time steps x feature_num
+    loss = loss_function(train_scores, y_target.view(-1, 1))
+    loss.backward()
+    optimizer.step()
+    return loss
+
 """
 LSTM学習の実施
 
@@ -145,18 +167,11 @@ for epoch in range(settings.n_epocs):
     # 1. まずはtrainデータのindexをランダムに入れ替える。最初のtime_steps分は使わない。
     perm_idx = np.random.permutation(np.arange(settings.time_steps, train_size))
     # 2. batch size毎にperm_idxの対象のindexを取得
-    for t_i in range(0, len(perm_idx), settings.batch_size):  # 0からperm_idxの行数になるまでbatch_size(128)を増分として繰り返す
-        batch_idx = perm_idx[t_i:(t_i + settings.batch_size)] #t_i件目からbatch_size(128)行目を抜き出す
+    # 0からperm_idxの行数になるまでbatch_size(128)を増分として繰り返す
+    for t_i in range(0, len(perm_idx), settings.batch_size):  
         # 3. LSTM入力用の時系列データの準備
-        # featsは、次元が(128(batch_size), 50(time_steps), 5(Columns)）でX_trainのbatch_idxの各インデックスの値が設定されたもの
-        feats = prep_feature_data(batch_idx, settings.time_steps, X_train, settings.feature_num, device)
-        y_target = y_train[batch_idx]                #学習用データからbatch_idxを抜き出してy_targetとする
         # 4. pytorch LSTMの学習実施
-        model.zero_grad()
-        train_scores = model(feats) # batch size x time steps x feature_num
-        loss = loss_function(train_scores, y_target.view(-1, 1))
-        loss.backward()
-        optimizer.step()
+        loss = exec_learning(perm_idx, t_i)
 
     # 5. validationデータの評価
     print('EPOCH: ', str(epoch), ' loss :', loss.item())
@@ -168,12 +183,7 @@ for epoch in range(settings.n_epocs):
     # 6. validationの評価が良ければモデルを保存
     if acc_score > best_acc_score:
         best_acc_score = acc_score
-        if not os.path.exists("./models"):
-            os.mkdir("./models")
-        #if os.path.exists('./models/pytorch_v1.mdl'):
-        #    os.remove('./models/pytorch_v1.mdl')
-        torch.save(model.state_dict(),'./models/pytorch_v1.mdl')
-        print('best score updated, Pytorch model was saved!!', )
+        save_model()
 
 # 7. bestモデルで予測する。
 model.load_state_dict(torch.load('./models/pytorch_v1.mdl'))
